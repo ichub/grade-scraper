@@ -13,6 +13,10 @@ namespace GradeScraper
 {
     static class Browser
     {
+        private const string LoginUrl = "https://grades.bsd405.org/Pinnacle/Gradebook/Logon.aspx?ReturnUrl=%2fPinnacle%2fGradebook";
+        private const string GradeSummaryUrl = "https://grades.bsd405.org/Pinnacle/Gradebook/InternetViewer/gradesummary.aspx";
+        private const string GradeRootUrl = "https://grades.bsd405.org/Pinnacle/Gradebook/InternetViewer/";
+
         public static async Task<Report> GetGradeReport(string username, string password)
         {
             using (HttpClient client = new HttpClient())
@@ -25,6 +29,14 @@ namespace GradeScraper
 
                 return await ScrapeAllCourses(client);
             }
+        }
+
+        /*
+        * For some reason, the grade server gives an empty response unless we have a user agent, so we set the useragent to be the latest version of chrome.
+        */
+        private static void InitClient(HttpClient client)
+        {
+            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2272.118 Safari/537.36");
         }
 
         /*
@@ -53,6 +65,7 @@ namespace GradeScraper
                    { "PageUniqueId", "" }
                 };
 
+            // place all the scraped variable values into the form
             foreach (var variable in variables)
             {
                 formValues[variable.Key] = variable.Value;
@@ -61,19 +74,8 @@ namespace GradeScraper
             var content = new FormUrlEncodedContent(formValues);
 
             // post the login form
-            var response = await client.PostAsync("https://grades.bsd405.org/Pinnacle/Gradebook/Logon.aspx?ReturnUrl=%2fPinnacle%2fGradebook", content);
-
-            string responseText = await response.Content.ReadAsStringAsync();
+            await HttpPost(client, LoginUrl, content);
         }
-
-        /*
-         * For some reason, the grade server gives an empty response unless we have a user agent, so we set the useragent to be the latest version of chrome.
-         */
-        private static void InitClient(HttpClient client)
-        {
-            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2272.118 Safari/537.36");
-        }
-
 
         /*
          * Gets the form validation values from the homepage of the grade viewer site. The login form has special values (eg. __VIEWSTATE
@@ -87,8 +89,7 @@ namespace GradeScraper
          */
         private static async Task<Dictionary<string, string>> ScrapeFormValidationValues(HttpClient client)
         {
-            var response = await client.GetAsync("https://grades.bsd405.org/Pinnacle/Gradebook/Logon.aspx?ReturnUrl=%2fPinnacle%2fGradebook");
-            var responseString = await response.Content.ReadAsStringAsync();
+            var responseString = await HttpGet(client, LoginUrl);
 
             string[] requiredVarNames = new[]
             {
@@ -126,28 +127,29 @@ namespace GradeScraper
         {
             List<Course> courses = new List<Course>();
 
-            var grades = await client.GetAsync("https://grades.bsd405.org/Pinnacle/Gradebook/InternetViewer/gradesummary.aspx");
-            string html = await grades.Content.ReadAsStringAsync();
+            string html = await HttpGet(client, GradeSummaryUrl);
 
             HtmlDocument doc = new HtmlDocument();
             doc.LoadHtml(html);
 
-            var courseRows = doc.DocumentNode.Descendants("tr").Where(d =>
-                d.Attributes.Contains("class") && d.Attributes["class"].Value.Contains("row")
-            );
+            var courseRows = from row in doc.DocumentNode.Descendants("tr")
+                             where row.Attributes.Contains("class")
+                             where row.Attributes["class"].Value.Contains("row")
+                             select row;
 
             foreach (var row in courseRows)
             {
-                string courseUrl = "https://grades.bsd405.org/Pinnacle/Gradebook/InternetViewer/" +
-                    WebUtility.HtmlDecode(
-                        row.Descendants("td").Where(d =>                        // table data
-                        d.Attributes["class"].Value.Contains("gradeNumeric"))   // the one that contains the grade link
-                        .First()                                                // the first (and only one)
-                        .FirstChild                                             // the <a> tag (link)
-                        .Attributes["href"].Value);                             // link to the grade page
+                var gradeElement = (from td in row.Descendants("td")
+                                    where td.Attributes["class"].Value.Contains("gradeNumeric")
+                                    select td).First();
 
-                var coursePage = await client.GetAsync(courseUrl);
-                string courseHtml = await coursePage.Content.ReadAsStringAsync();
+                string courseUrl = GradeRootUrl +
+                    WebUtility.HtmlDecode(
+                        gradeElement
+                        .FirstChild                     // the <a> tag (link)
+                        .Attributes["href"].Value);     // link to the grade page
+
+                string courseHtml = await HttpGet(client, courseUrl);
 
                 courses.Add(ScrapeIndividualCourse(courseHtml));
             }
@@ -185,7 +187,7 @@ namespace GradeScraper
 
             string courseName = doc             // we actually have the id here, so that's nice
                 .GetElementbyId("ClassTitle")
-                .InnerText;                                     
+                .InnerText;
 
             string term = courseDetailsTableBody.ChildNodes[3].ChildNodes[3].InnerText;     // going purely off the relative locations of the elements here
             string teacher = courseDetailsTableBody.ChildNodes[5].ChildNodes[3].InnerText;  // here too...
@@ -214,6 +216,18 @@ namespace GradeScraper
             string comments = WebUtility.HtmlDecode(tds[6].InnerText);
 
             return new Assignment(number, description, dueDate, category, grade, max, letter, comments);
+        }
+
+        private static async Task<string> HttpGet(HttpClient client, string url)
+        {
+            var response = await client.GetAsync(url);
+            return await response.Content.ReadAsStringAsync();
+        }
+
+        private static async Task<string> HttpPost(HttpClient client, string url, FormUrlEncodedContent content)
+        {
+            var response = await client.PostAsync(url, content);
+            return await response.Content.ReadAsStringAsync();
         }
     }
 }
